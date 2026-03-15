@@ -6,12 +6,15 @@ renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color("#7fb7ff");
-scene.fog = new THREE.Fog("#7fb7ff", 80, 240);
+scene.background = new THREE.Color("#82bfff");
+scene.fog = new THREE.Fog("#82bfff", 90, 320);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 700);
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
 const statusEl = document.getElementById("status");
 const overlayEl = document.getElementById("overlay");
+const startPanelEl = document.getElementById("startPanel");
+const messagePanelEl = document.getElementById("messagePanel");
+const startBtnEl = document.getElementById("startBtn");
 const curseFxEl = document.getElementById("curseFx");
 
 const world = {
@@ -23,19 +26,25 @@ const world = {
   tileSize: 4,
   speedScale: 1,
   curseTimer: 0,
-  catShootCd: 0,
-  rngSeed: Math.random() * 1e6,
+  catShootCd: 2.5,
 };
 
 const player = {
   pos: new THREE.Vector3(0, 8, 0),
   vel: new THREE.Vector3(),
-  yaw: 0,
-  pitch: 0,
+  heading: 0,
   grounded: false,
   health: 100,
   maxHealth: 100,
   respawns: 0,
+  profile: null,
+};
+
+const profiles = {
+  boy1: { name: "Boy 1", speedMul: 0.95, jumpMul: 0.98, hpMul: 1.2, colors: ["#6b7d91", "#5f3b1f", "#9fb4c6"] },
+  boy2: { name: "Boy 2", speedMul: 0.92, jumpMul: 1.0, hpMul: 1.25, colors: ["#7d6d79", "#4d2f1a", "#b5bbc5"] },
+  girl1: { name: "Girl 1", speedMul: 1.08, jumpMul: 1.06, hpMul: 0.95, colors: ["#ff8fcf", "#8c4f2d", "#ffd9ef"] },
+  girl2: { name: "Girl 2", speedMul: 1.1, jumpMul: 1.04, hpMul: 0.92, colors: ["#ffb4da", "#824b2a", "#ffe4f1"] },
 };
 
 const input = {};
@@ -46,39 +55,27 @@ const hazardGroup = new THREE.Group();
 const actorGroup = new THREE.Group();
 scene.add(courseGroup, hazardGroup, actorGroup);
 
-const colliders = []; // AABB boxes
-const courseNodes = []; // platform centers
+const colliders = [];
+const courseNodes = [];
 const movingPlatforms = [];
 const curseZones = [];
 const arrowTraps = [];
 const enemyProjectiles = [];
 const enemies = [];
+
 let dog = null;
 let playerMesh = null;
 
 initLights();
 initLava();
-playerMesh = createDalekCan();
-actorGroup.add(playerMesh);
-buildLevel(1);
 
-overlayEl.addEventListener("click", () => renderer.domElement.requestPointerLock());
+bindCharacterSelect();
 
-document.addEventListener("pointerlockchange", () => {
-  started = document.pointerLockElement === renderer.domElement;
-  overlayEl.classList.toggle("hidden", started);
+window.addEventListener("keydown", (e) => {
+  input[e.code] = true;
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
 });
-
-document.addEventListener("keydown", (e) => (input[e.code] = true));
-document.addEventListener("keyup", (e) => (input[e.code] = false));
-
-document.addEventListener("mousemove", (e) => {
-  if (!started) return;
-  player.yaw -= e.movementX * 0.0022;
-  player.pitch -= e.movementY * 0.0018;
-  player.pitch = THREE.MathUtils.clamp(player.pitch, -1.35, 1.2);
-});
-
+window.addEventListener("keyup", (e) => (input[e.code] = false));
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -87,6 +84,33 @@ window.addEventListener("resize", () => {
 
 const clock = new THREE.Clock();
 loop();
+
+function bindCharacterSelect() {
+  const buttons = [...document.querySelectorAll(".char-btn")];
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      buttons.forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      player.profile = profiles[btn.dataset.char];
+      startBtnEl.disabled = false;
+    });
+  });
+
+  startBtnEl.addEventListener("click", () => {
+    if (!player.profile) return;
+    if (!playerMesh) {
+      player.maxHealth = Math.round(100 * player.profile.hpMul);
+      player.health = player.maxHealth;
+      playerMesh = createDalekCan(player.profile.colors);
+      actorGroup.add(playerMesh);
+      buildLevel(1);
+    }
+    startPanelEl.classList.add("hidden");
+    messagePanelEl.classList.add("hidden");
+    overlayEl.classList.add("hidden");
+    started = true;
+  });
+}
 
 function loop() {
   const dt = Math.min(clock.getDelta(), 0.033);
@@ -98,8 +122,10 @@ function loop() {
     tickArrowTraps(dt);
     tickCurse(dt);
     checkLevelProgress();
-    updateCamera();
+    updateCamera(dt);
     updateUI();
+  } else if (playerMesh) {
+    updateCamera(dt);
   }
 
   animateDalek(clock.elapsedTime);
@@ -110,69 +136,71 @@ function loop() {
 function buildLevel(level) {
   world.level = level;
   world.speedScale = 1 + (level - 1) * 0.16;
-  world.catShootCd = Math.max(1.5, 2.8 - level * 0.16);
-  world.rngSeed = Math.random() * 1e6;
+  world.catShootCd = Math.max(1.3, 2.5 - level * 0.12);
   clearGroups();
 
-  const rng = mulberry32(Math.floor(world.rngSeed));
+  const rng = mulberry32((Math.random() * 1e9) | 0);
   const width = world.tileSize;
-  const platformCount = 16 + Math.min(20, level * 2);
+  const platformCount = 18 + Math.min(24, level * 2);
   const maxGap = Math.min(world.maxJumpGap, 4.2 + level * 0.12);
   let pos = new THREE.Vector3(0, 2, 0);
   let heading = new THREE.Vector3(0, 0, 1);
 
   for (let i = 0; i < platformCount; i++) {
     const box = new THREE.Vector3(width + rng() * 2.2, 1.4 + rng() * 0.9, width + rng() * 2.2);
-    addPlatform(pos.clone(), box, "#6faa52");
+    addPlatform(pos.clone(), box, i % 3 === 0 ? "#83b95e" : "#6daa50");
     courseNodes.push(pos.clone());
 
     if (i > 2 && rng() > 0.73) addCurseZone(pos.clone(), box);
     if (i > 3 && rng() > 0.79) addMovingPusher(pos.clone(), box, rng);
 
-    const yaw = (rng() - 0.5) * 0.8;
-    heading.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw).normalize();
+    heading.applyAxisAngle(new THREE.Vector3(0, 1, 0), (rng() - 0.5) * 0.8).normalize();
     const gap = 2 + rng() * maxGap;
-    const dy = (rng() - 0.5) * Math.min(2.2, 0.5 + level * 0.1);
+    const dy = (rng() - 0.5) * Math.min(2.2, 0.55 + level * 0.1);
 
     const next = pos.clone().addScaledVector(heading, box.z * 0.45 + gap + width * 0.45);
     next.y = THREE.MathUtils.clamp(pos.y + dy, 1, 8);
 
-    // Enforce jumpability
     if (!isJumpable(pos, next, gap)) {
-      next.copy(pos).addScaledVector(heading, box.z * 0.45 + (1.8 + maxGap * 0.55) + width * 0.45);
-      next.y = THREE.MathUtils.clamp(pos.y + Math.sign(dy) * 0.8, 1, 6);
+      next.copy(pos).addScaledVector(heading, box.z * 0.45 + (1.8 + maxGap * 0.5) + width * 0.45);
+      next.y = THREE.MathUtils.clamp(pos.y + Math.sign(dy || 1) * 0.8, 1, 6);
     }
+
     pos = next;
   }
 
-  // Finish platform and dog
-  addPlatform(pos.clone(), new THREE.Vector3(7, 1.5, 7), "#9ac16f");
+  addPlatform(pos.clone(), new THREE.Vector3(8, 1.6, 8), "#b6d88a");
   dog = createDog();
   dog.position.copy(pos).add(new THREE.Vector3(0, 1.5, 0));
   actorGroup.add(dog);
 
-  // Enemies by level
-  spawnCats(Math.min(3 + level, 10), rng);
-  if (level >= 3) spawnArrowTraps(Math.min(2 + level, 9), rng);
-  if (level >= 5) spawnWolves(Math.min(1 + Math.floor(level / 2), 6), rng);
+  spawnCats(Math.min(4 + level, 12), rng);
+  if (level >= 3) spawnArrowTraps(Math.min(2 + level, 10), rng);
+  if (level >= 5) spawnWolves(Math.min(1 + Math.floor(level / 2), 7), rng);
 
-  // Reset player at start
   player.pos.copy(courseNodes[0]).add(new THREE.Vector3(0, 3.1, 0));
   player.vel.set(0, 0, 0);
+  player.heading = 0;
   player.health = player.maxHealth;
+  if (playerMesh) {
+    playerMesh.position.copy(player.pos);
+  }
 }
 
 function isJumpable(a, b, gap) {
+  const speed = 10.5 * player.profile.speedMul;
   const dxz = new THREE.Vector2(b.x - a.x, b.z - a.z).length();
   const dy = b.y - a.y;
-  const t = dxz / 10.5; // approx sprint horizontal speed
-  const yReach = world.jumpV * t - 0.5 * world.gravity * t * t;
+  const t = dxz / speed;
+  const yReach = world.jumpV * player.profile.jumpMul * t - 0.5 * world.gravity * t * t;
   return gap <= world.maxJumpGap && dy <= 2.6 && yReach > dy - 0.6;
 }
 
 function addPlatform(center, size, color) {
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.95 });
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size.x, size.y, size.z), mat);
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(size.x, size.y, size.z),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.95 }),
+  );
   mesh.position.copy(center);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -181,7 +209,6 @@ function addPlatform(center, size, color) {
   colliders.push({
     min: new THREE.Vector3(center.x - size.x / 2, center.y - size.y / 2, center.z - size.z / 2),
     max: new THREE.Vector3(center.x + size.x / 2, center.y + size.y / 2, center.z + size.z / 2),
-    movingRef: null,
   });
 }
 
@@ -203,6 +230,7 @@ function addMovingPusher(center, size, rng) {
   pusher.position.copy(center).add(new THREE.Vector3(0, size.y * 0.6 + 0.7, 0));
   pusher.castShadow = true;
   hazardGroup.add(pusher);
+
   movingPlatforms.push({
     mesh: pusher,
     base: pusher.position.clone(),
@@ -245,33 +273,33 @@ function spawnArrowTraps(count, rng) {
     trap.position.copy(origin);
     trap.castShadow = true;
     hazardGroup.add(trap);
-    arrowTraps.push({ mesh: trap, dir, cooldown: Math.max(0.9, 1.7 - world.level * 0.08), timer: rng() * 1.3 });
+    arrowTraps.push({ mesh: trap, dir, cooldown: Math.max(0.85, 1.7 - world.level * 0.08), timer: rng() * 1.3 });
   }
 }
 
 function tickPlayer(dt) {
-  const sprint = input.ShiftLeft || input.ShiftRight;
-  const speed = (sprint ? 14 : 10) * (1 + Math.min(0.3, world.level * 0.02));
-  const forward = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw));
-  const right = new THREE.Vector3(forward.z, 0, -forward.x);
-  const move = new THREE.Vector3();
+  const speed = 12 * player.profile.speedMul * (1 + Math.min(0.3, world.level * 0.02));
+  const turnSpeed = 2.2;
 
-  if (input.KeyW) move.add(forward);
-  if (input.KeyS) move.sub(forward);
-  if (input.KeyA) move.sub(right);
-  if (input.KeyD) move.add(right);
+  if (input.ArrowLeft) player.heading += turnSpeed * dt;
+  if (input.ArrowRight) player.heading -= turnSpeed * dt;
 
-  if (move.lengthSq() > 0) {
-    move.normalize().multiplyScalar(speed);
-    player.vel.x = THREE.MathUtils.lerp(player.vel.x, move.x, 0.18);
-    player.vel.z = THREE.MathUtils.lerp(player.vel.z, move.z, 0.18);
+  const forward = new THREE.Vector3(Math.sin(player.heading), 0, Math.cos(player.heading));
+  let moveMag = 0;
+  if (input.ArrowUp) moveMag += 1;
+  if (input.ArrowDown) moveMag -= 0.7;
+
+  if (moveMag !== 0) {
+    const target = forward.multiplyScalar(speed * moveMag);
+    player.vel.x = THREE.MathUtils.lerp(player.vel.x, target.x, 0.16);
+    player.vel.z = THREE.MathUtils.lerp(player.vel.z, target.z, 0.16);
   } else {
     player.vel.x *= 0.84;
     player.vel.z *= 0.84;
   }
 
   if (input.Space && player.grounded) {
-    player.vel.y = world.jumpV;
+    player.vel.y = world.jumpV * player.profile.jumpMul;
     player.grounded = false;
   }
 
@@ -281,25 +309,17 @@ function tickPlayer(dt) {
 
   resolveGroundCollision(prev);
 
-  if (player.pos.y < world.lavaY + 0.5) {
-    failRun("You fell into lava. Run reset.");
-  }
-
-  if (player.health <= 0) {
-    failRun("You were defeated. Run reset.");
-  }
+  if (player.pos.y < world.lavaY + 0.5) failRun("You fell into lava. Run reset.");
+  if (player.health <= 0) failRun("You were defeated. Run reset.");
 
   playerMesh.position.copy(player.pos);
-  playerMesh.rotation.y = player.yaw + Math.PI;
+  playerMesh.rotation.y = player.heading + Math.PI;
 }
 
 function resolveGroundCollision(prev) {
   player.grounded = false;
-  const px = player.pos.x;
-  const pz = player.pos.z;
-
   for (const c of colliders) {
-    const insideXZ = px > c.min.x && px < c.max.x && pz > c.min.z && pz < c.max.z;
+    const insideXZ = player.pos.x > c.min.x && player.pos.x < c.max.x && player.pos.z > c.min.z && player.pos.z < c.max.z;
     if (!insideXZ) continue;
 
     const top = c.max.y + 1.8;
@@ -335,21 +355,18 @@ function tickCurse(dt) {
       break;
     }
   }
-
-  if (onCurse) world.curseTimer = Math.min(5, world.curseTimer + dt * 1.8);
-  else world.curseTimer = Math.max(0, world.curseTimer - dt * 0.9);
+  world.curseTimer = onCurse ? Math.min(5, world.curseTimer + dt * 1.8) : Math.max(0, world.curseTimer - dt * 0.9);
 
   const k = world.curseTimer / 5;
-  scene.fog.near = 8 + (1 - k) * 72;
-  scene.fog.far = 24 + (1 - k) * 216;
-  curseFxEl.style.opacity = (k * 0.9).toFixed(2);
+  scene.fog.near = 14 + (1 - k) * 80;
+  scene.fog.far = 35 + (1 - k) * 290;
+  curseFxEl.style.opacity = (k * 0.92).toFixed(2);
 }
 
 function tickEnemies(dt) {
   const player2D = player.pos.clone().setY(0);
   enemies.forEach((e) => {
     if (!e.alive) return;
-
     const self2D = e.group.position.clone().setY(0);
     const toP = player2D.clone().sub(self2D);
     const d = toP.length();
@@ -401,14 +418,6 @@ function tickProjectiles(dt) {
   }
 }
 
-function destroyProjectile(i) {
-  const p = enemyProjectiles[i];
-  hazardGroup.remove(p.mesh);
-  p.mesh.geometry.dispose();
-  p.mesh.material.dispose();
-  enemyProjectiles.splice(i, 1);
-}
-
 function tickArrowTraps(dt) {
   arrowTraps.forEach((t) => {
     t.timer -= dt;
@@ -426,43 +435,57 @@ function tickArrowTraps(dt) {
   });
 }
 
+function destroyProjectile(i) {
+  const p = enemyProjectiles[i];
+  hazardGroup.remove(p.mesh);
+  p.mesh.geometry.dispose();
+  p.mesh.material.dispose();
+  enemyProjectiles.splice(i, 1);
+}
+
 function checkLevelProgress() {
   if (!dog) return;
   if (player.pos.distanceTo(dog.position) < 2.5) {
-    overlayEl.textContent = `Dog saved! Advancing to level ${world.level + 1}...`;
-    overlayEl.classList.remove("hidden");
     started = false;
+    overlayEl.classList.remove("hidden");
+    startPanelEl.classList.add("hidden");
+    messagePanelEl.classList.remove("hidden");
+    messagePanelEl.textContent = `Dog saved! Building level ${world.level + 1}...`;
     setTimeout(() => {
       buildLevel(world.level + 1);
-      overlayEl.textContent = "Click to Start";
-    }, 950);
+      messagePanelEl.textContent = "Level ready. Press Start Run to continue.";
+      startPanelEl.classList.remove("hidden");
+    }, 900);
   }
 }
 
 function failRun(msg) {
   player.respawns += 1;
   started = false;
-  overlayEl.textContent = msg + " Click to try again.";
   overlayEl.classList.remove("hidden");
-  document.exitPointerLock();
+  startPanelEl.classList.remove("hidden");
+  messagePanelEl.classList.remove("hidden");
+  messagePanelEl.textContent = `${msg} Press Start Run.`;
   buildLevel(world.level);
 }
 
-function updateCamera() {
-  const camOffset = new THREE.Vector3(0, 3.1, 8.8);
-  camOffset.applyAxisAngle(new THREE.Vector3(1, 0, 0), player.pitch * 0.45);
-  camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), player.yaw);
-  camera.position.copy(player.pos).add(camOffset);
+function updateCamera(dt) {
+  if (!playerMesh) return;
 
-  const look = player.pos.clone().add(new THREE.Vector3(0, 2.1, 0));
-  look.x += Math.sin(player.yaw) * 7;
-  look.y += Math.sin(player.pitch) * 4.4;
-  look.z += Math.cos(player.yaw) * 7;
-  camera.lookAt(look);
+  const desired = player.pos
+    .clone()
+    .add(new THREE.Vector3(0, 8.5, 0))
+    .add(new THREE.Vector3(-Math.sin(player.heading) * 18, 0, -Math.cos(player.heading) * 18));
+
+  camera.position.lerp(desired, Math.min(1, dt * 3.2));
+
+  const look = player.pos.clone().add(new THREE.Vector3(0, 3.6, 0));
+  const ahead = new THREE.Vector3(Math.sin(player.heading), 0.18, Math.cos(player.heading)).multiplyScalar(8);
+  camera.lookAt(look.add(ahead));
 }
 
 function updateUI() {
-  statusEl.innerHTML = `Level: ${world.level}<br>Health: ${Math.max(0, player.health).toFixed(0)}<br>Cats/Wolves: ${enemies.filter((e) => e.alive).length}<br>Arrow traps: ${arrowTraps.length}<br>Respawns: ${player.respawns}`;
+  statusEl.innerHTML = `Character: ${player.profile?.name || "-"}<br>Level: ${world.level}<br>Health: ${Math.max(0, player.health).toFixed(0)} / ${player.maxHealth}<br>Cats/Wolves: ${enemies.filter((e) => e.alive).length}<br>Arrow traps: ${arrowTraps.length}<br>Respawns: ${player.respawns}`;
 }
 
 function clearGroups() {
@@ -486,24 +509,23 @@ function clearGroups() {
   arrowTraps.length = 0;
   enemyProjectiles.length = 0;
   enemies.length = 0;
-
-  actorGroup.add(playerMesh);
+  if (playerMesh) actorGroup.add(playerMesh);
 }
 
 function initLights() {
-  scene.add(new THREE.HemisphereLight("#c2e0ff", "#3e2b1f", 0.42));
+  scene.add(new THREE.HemisphereLight("#d0e7ff", "#39291f", 0.42));
   const sunColors = ["#ffd685", "#ffe7a1", "#ffc29d", "#f9e6b8", "#fff7cc"];
   const sunPos = [[45, 78, 20], [-50, 72, -35], [0, 88, 0], [25, 67, -62], [-40, 65, 55]];
   sunPos.forEach((p, i) => {
-    const d = new THREE.DirectionalLight(sunColors[i], 0.35);
+    const d = new THREE.DirectionalLight(sunColors[i], 0.33);
     d.position.set(...p);
     d.castShadow = i === 0;
     if (i === 0) {
       d.shadow.mapSize.set(2048, 2048);
-      d.shadow.camera.left = -120;
-      d.shadow.camera.right = 120;
-      d.shadow.camera.top = 120;
-      d.shadow.camera.bottom = -120;
+      d.shadow.camera.left = -160;
+      d.shadow.camera.right = 160;
+      d.shadow.camera.top = 160;
+      d.shadow.camera.bottom = -160;
     }
     scene.add(d);
 
@@ -515,7 +537,7 @@ function initLights() {
 
 function initLava() {
   const lava = new THREE.Mesh(
-    new THREE.BoxGeometry(420, 2, 420),
+    new THREE.BoxGeometry(520, 2, 520),
     new THREE.MeshStandardMaterial({ color: "#ff5f0f", emissive: "#a72f00", emissiveIntensity: 0.6, roughness: 0.8 }),
   );
   lava.position.set(0, world.lavaY, 0);
@@ -523,11 +545,11 @@ function initLava() {
   scene.add(lava);
 }
 
-function createDalekCan() {
+function createDalekCan([bodyColor, legColor, armColor]) {
   const g = new THREE.Group();
-  const bodyMat = new THREE.MeshStandardMaterial({ color: "#8badbb", metalness: 0.35, roughness: 0.45 });
-  const legMat = new THREE.MeshStandardMaterial({ color: "#7a4a21", roughness: 0.8 });
-  const armMat = new THREE.MeshStandardMaterial({ color: "#b8d5df", metalness: 0.2, roughness: 0.45 });
+  const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, metalness: 0.35, roughness: 0.45 });
+  const legMat = new THREE.MeshStandardMaterial({ color: legColor, roughness: 0.8 });
+  const armMat = new THREE.MeshStandardMaterial({ color: armColor, metalness: 0.2, roughness: 0.45 });
 
   const dome = new THREE.Mesh(new THREE.SphereGeometry(1.1, 16, 16), bodyMat);
   dome.position.y = 3.1;
@@ -565,6 +587,7 @@ function createDalekCan() {
 }
 
 function animateDalek(t) {
+  if (!playerMesh) return;
   const swing = Math.sin(t * 11) * Math.min(0.5, player.vel.length() * 0.04);
   playerMesh.children.forEach((c, i) => {
     if (i >= 4) c.rotation.x = swing * (i % 2 ? 1 : -1);
@@ -584,12 +607,6 @@ function createCatEnemy() {
   head.position.set(0, 2, 0.05);
   g.add(head);
 
-  const earL = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.35, 4), fur);
-  const earR = earL.clone();
-  earL.position.set(-0.22, 2.5, 0.05);
-  earR.position.set(0.22, 2.5, 0.05);
-  g.add(earL, earR);
-
   const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), eye);
   const eyeR = eyeL.clone();
   eyeL.position.set(-0.16, 2.06, 0.42);
@@ -597,7 +614,6 @@ function createCatEnemy() {
   g.add(eyeL, eyeR);
 
   g.traverse((m) => m.isMesh && ((m.castShadow = true), (m.receiveShadow = true)));
-
   return { type: "cat", group: g, alive: true, vel: new THREE.Vector3(), speed: 5.5, hitRange: 1.6, meleeDamage: 10, shootTimer: 1.5, seed: Math.random() * 10 };
 }
 
