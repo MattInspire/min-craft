@@ -1,0 +1,57 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #0d1117;
+}
+
+canvas {
+  display: block;
+}
+
+#ui {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 10px 14px;
+  max-width: min(480px, 88vw);
+  z-index: 10;
+}
+
+#ui h1 {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+}
+
+#ui p {
+  margin: 3px 0;
+  font-size: 0.85rem;
+}
+
+#status {
+  margin-top: 8px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+#overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: clamp(1.3rem, 2vw, 1.9rem);
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 9;
+}
+
+#overlay.hidden {
+  display: none;
+}
