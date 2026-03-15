@@ -34,17 +34,20 @@ const player = {
   vel: new THREE.Vector3(),
   heading: 0,
   grounded: false,
+  radius: 0.62,
+  height: 2.2,
   health: 100,
   maxHealth: 100,
   respawns: 0,
+  profileKey: null,
   profile: null,
 };
 
 const profiles = {
-  boy1: { name: "Boy 1", speedMul: 0.95, jumpMul: 0.98, hpMul: 1.2, colors: ["#6b7d91", "#5f3b1f", "#9fb4c6"] },
-  boy2: { name: "Boy 2", speedMul: 0.92, jumpMul: 1.0, hpMul: 1.25, colors: ["#7d6d79", "#4d2f1a", "#b5bbc5"] },
-  girl1: { name: "Girl 1", speedMul: 1.08, jumpMul: 1.06, hpMul: 0.95, colors: ["#ff8fcf", "#8c4f2d", "#ffd9ef"] },
-  girl2: { name: "Girl 2", speedMul: 1.1, jumpMul: 1.04, hpMul: 0.92, colors: ["#ffb4da", "#824b2a", "#ffe4f1"] },
+  boy1: { name: "Boy 1", speedMul: 0.95, jumpMul: 0.98, hpMul: 1.2, model: "boy1" },
+  boy2: { name: "Boy 2", speedMul: 0.92, jumpMul: 1.0, hpMul: 1.25, model: "boy2" },
+  girl1: { name: "Girl 1", speedMul: 1.08, jumpMul: 1.06, hpMul: 0.95, model: "girl1" },
+  girl2: { name: "Girl 2", speedMul: 1.1, jumpMul: 1.04, hpMul: 0.92, model: "girl2" },
 };
 
 const input = {};
@@ -91,18 +94,14 @@ function bindCharacterSelect() {
     btn.addEventListener("click", () => {
       buttons.forEach((b) => b.classList.remove("selected"));
       btn.classList.add("selected");
-      player.profile = profiles[btn.dataset.char];
+      applyProfile(btn.dataset.char);
       startBtnEl.disabled = false;
     });
   });
 
   startBtnEl.addEventListener("click", () => {
     if (!player.profile) return;
-    if (!playerMesh) {
-      player.maxHealth = Math.round(100 * player.profile.hpMul);
-      player.health = player.maxHealth;
-      playerMesh = createDalekCan(player.profile.colors);
-      actorGroup.add(playerMesh);
+    if (courseNodes.length === 0) {
       buildLevel(1);
     }
     startPanelEl.classList.add("hidden");
@@ -110,6 +109,19 @@ function bindCharacterSelect() {
     overlayEl.classList.add("hidden");
     started = true;
   });
+}
+
+function applyProfile(profileKey) {
+  player.profileKey = profileKey;
+  player.profile = profiles[profileKey];
+  player.maxHealth = Math.round(100 * player.profile.hpMul);
+  player.health = Math.min(player.health || player.maxHealth, player.maxHealth);
+
+  const nextMesh = createCharacterMesh(player.profile.model);
+  if (playerMesh) actorGroup.remove(playerMesh);
+  playerMesh = nextMesh;
+  playerMesh.position.copy(player.pos);
+  actorGroup.add(playerMesh);
 }
 
 function loop() {
@@ -141,7 +153,7 @@ function buildLevel(level) {
 
   const rng = mulberry32((Math.random() * 1e9) | 0);
   const width = world.tileSize;
-  const platformCount = 18 + Math.min(24, level * 2);
+  const platformCount = Math.max(1, level);
   const maxGap = Math.min(world.maxJumpGap, 4.2 + level * 0.12);
   let pos = new THREE.Vector3(0, 2, 0);
   let heading = new THREE.Vector3(0, 0, 1);
@@ -169,7 +181,7 @@ function buildLevel(level) {
     pos = next;
   }
 
-  addPlatform(pos.clone(), new THREE.Vector3(8, 1.6, 8), "#b6d88a");
+  addPlatform(pos.clone(), new THREE.Vector3(8, 1.8, 8), "#b6d88a");
   dog = createDog();
   dog.position.copy(pos).add(new THREE.Vector3(0, 1.5, 0));
   actorGroup.add(dog);
@@ -319,12 +331,16 @@ function tickPlayer(dt) {
 function resolveGroundCollision(prev) {
   player.grounded = false;
   for (const c of colliders) {
-    const insideXZ = player.pos.x > c.min.x && player.pos.x < c.max.x && player.pos.z > c.min.z && player.pos.z < c.max.z;
+    const insideXZ =
+      player.pos.x > c.min.x - player.radius &&
+      player.pos.x < c.max.x + player.radius &&
+      player.pos.z > c.min.z - player.radius &&
+      player.pos.z < c.max.z + player.radius;
     if (!insideXZ) continue;
 
-    const top = c.max.y + 1.8;
-    const prevAbove = prev.y >= top - 0.2;
-    if (player.pos.y <= top && prevAbove && player.vel.y <= 0) {
+    const top = c.max.y + player.height;
+    const prevAbove = prev.y >= top - 0.45;
+    if (player.pos.y <= top + 0.25 && prevAbove && player.vel.y <= 0) {
       player.pos.y = top;
       player.vel.y = 0;
       player.grounded = true;
@@ -545,45 +561,169 @@ function initLava() {
   scene.add(lava);
 }
 
-function createDalekCan([bodyColor, legColor, armColor]) {
+function createCharacterMesh(model) {
+  switch (model) {
+    case "boy1":
+      return createBoy1();
+    case "boy2":
+      return createBoy2();
+    case "girl1":
+      return createGirl1();
+    case "girl2":
+      return createGirl2();
+    default:
+      return createBoy1();
+  }
+}
+
+function createBoy1() {
   const g = new THREE.Group();
-  const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, metalness: 0.35, roughness: 0.45 });
-  const legMat = new THREE.MeshStandardMaterial({ color: legColor, roughness: 0.8 });
-  const armMat = new THREE.MeshStandardMaterial({ color: armColor, metalness: 0.2, roughness: 0.45 });
+  const skin = new THREE.MeshStandardMaterial({ color: "#b3835b", roughness: 0.75 });
+  const shirt = new THREE.MeshStandardMaterial({ color: "#556677", roughness: 0.6 });
+  const pants = new THREE.MeshStandardMaterial({ color: "#2f3340", roughness: 0.7 });
+  const hair = new THREE.MeshStandardMaterial({ color: "#332522", roughness: 0.85 });
 
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(1.1, 16, 16), bodyMat);
-  dome.position.y = 3.1;
-  g.add(dome);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.5, 0.8), shirt);
+  body.position.y = 2.4;
+  g.add(body);
 
-  const torso = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.9, 2.4, 20), bodyMat);
-  torso.position.y = 1.8;
-  g.add(torso);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.95, 0.95), skin);
+  head.position.y = 3.6;
+  g.add(head);
 
-  const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.23, 1.7, 10), bodyMat);
-  spout.rotation.z = -Math.PI / 2.8;
-  spout.position.set(1.6, 2.4, 0);
-  g.add(spout);
+  const hairCap = new THREE.Mesh(new THREE.BoxGeometry(1.02, 0.35, 1.02), hair);
+  hairCap.position.y = 4.05;
+  g.add(hairCap);
 
-  [-0.7, 0, 0.7].forEach((x) => {
-    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 1.2, 8), legMat);
-    leg.position.set(x, 0.6, 0.45);
+  [-0.33, 0.33].forEach((x) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.1, 0.45), pants);
+    leg.position.set(x, 1.1, 0);
     g.add(leg);
   });
 
-  [[1.6, 2.5, 0.7], [1.7, 2.15, 0], [1.6, 2.5, -0.7]].forEach(([x, y, z]) => {
-    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.1, 8), armMat);
-    arm.position.set(x, y, z);
-    arm.rotation.z = -Math.PI / 3;
+  [-0.85, 0.85].forEach((x) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.35, 1.1, 0.35), skin);
+    arm.position.set(x, 2.45, 0);
     g.add(arm);
   });
 
+  finalizeCharacter(g);
+  return g;
+}
+
+function createBoy2() {
+  const g = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: "#a97856", roughness: 0.75 });
+  const shirt = new THREE.MeshStandardMaterial({ color: "#6b5768", roughness: 0.6 });
+  const pants = new THREE.MeshStandardMaterial({ color: "#3a3643", roughness: 0.72 });
+  const hair = new THREE.MeshStandardMaterial({ color: "#2d2220", roughness: 0.85 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.35, 1.65, 0.9), shirt);
+  body.position.y = 2.35;
+  g.add(body);
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), skin);
+  head.position.y = 3.6;
+  g.add(head);
+
+  const brow = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.2, 0.3), hair);
+  brow.position.set(0, 3.9, 0.35);
+  g.add(brow);
+
+  [-0.37, 0.37].forEach((x) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.46, 1.05, 0.46), pants);
+    leg.position.set(x, 1.08, 0);
+    g.add(leg);
+  });
+
+  [-0.9, 0.9].forEach((x) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.2, 0.4), skin);
+    arm.position.set(x, 2.42, 0);
+    g.add(arm);
+  });
+
+  finalizeCharacter(g);
+  return g;
+}
+
+function createGirl1() {
+  const g = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: "#f0c4a0", roughness: 0.7 });
+  const dress = new THREE.MeshStandardMaterial({ color: "#ff8fcf", roughness: 0.55 });
+  const legMat = new THREE.MeshStandardMaterial({ color: "#ffd9ef", roughness: 0.65 });
+  const hair = new THREE.MeshStandardMaterial({ color: "#5a3d2e", roughness: 0.85 });
+
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.8, 1.6, 10), dress);
+  torso.position.y = 2.35;
+  g.add(torso);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.48, 12, 12), skin);
+  head.position.y = 3.55;
+  g.add(head);
+
+  const pony = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10), hair);
+  pony.position.set(-0.45, 3.45, -0.1);
+  g.add(pony);
+
+  [-0.27, 0.27].forEach((x) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.32, 1.1, 0.32), legMat);
+    leg.position.set(x, 1.1, 0);
+    g.add(leg);
+  });
+
+  [-0.7, 0.7].forEach((x) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.26, 1.0, 0.26), skin);
+    arm.position.set(x, 2.5, 0);
+    g.add(arm);
+  });
+
+  finalizeCharacter(g);
+  return g;
+}
+
+function createGirl2() {
+  const g = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: "#f2c9ae", roughness: 0.7 });
+  const outfit = new THREE.MeshStandardMaterial({ color: "#ffb4da", roughness: 0.55 });
+  const legMat = new THREE.MeshStandardMaterial({ color: "#ffe4f1", roughness: 0.66 });
+  const hair = new THREE.MeshStandardMaterial({ color: "#784f39", roughness: 0.82 });
+
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.52, 1.2, 4, 8), outfit);
+  torso.position.y = 2.35;
+  g.add(torso);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.47, 12, 12), skin);
+  head.position.y = 3.55;
+  g.add(head);
+
+  const hairBack = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.75, 0.35), hair);
+  hairBack.position.set(0, 3.45, -0.35);
+  g.add(hairBack);
+
+  [-0.26, 0.26].forEach((x) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.15, 0.3), legMat);
+    leg.position.set(x, 1.08, 0);
+    g.add(leg);
+  });
+
+  [-0.68, 0.68].forEach((x) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 1.02, 0.24), skin);
+    arm.position.set(x, 2.48, 0);
+    g.add(arm);
+  });
+
+  finalizeCharacter(g);
+  return g;
+}
+
+function finalizeCharacter(g) {
+  g.scale.setScalar(1.05);
   g.traverse((n) => {
     if (n.isMesh) {
       n.castShadow = true;
       n.receiveShadow = true;
     }
   });
-  return g;
 }
 
 function animateDalek(t) {

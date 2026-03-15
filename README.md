@@ -6,11 +6,12 @@ A browser 3D obstacle-course game with procedural level generation and escalatin
 
 - Controls: **Arrow keys** move/turn, **Space** jumps.
 - Camera is automatic and follows behind from a wider, pulled-back perspective.
-- Pick your character before starting:
+- Pick your character before starting. Each option now spawns a different 3D avatar:
   - Boy 1 / Boy 2: ugly + strong (more health)
   - Girl 1 / Girl 2: cute + quick (faster movement)
 - Rescue the dog at the end of each generated course.
 - Courses regenerate and get harder every level.
+- Level length scales directly with level number (Level 1 = 1 jump section, Level 2 = 2, etc.).
 
 ## Hazards and enemies
 
