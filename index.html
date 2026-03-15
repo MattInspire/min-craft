@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dalek Can: Dog Rescue Run</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="ui">
+      <h1>Dalek Can: Dog Rescue Run</h1>
+      <p>Arrow keys move · Space jump · Auto-follow camera</p>
+      <p>Rescue your dog at the end. New procedural level each clear.</p>
+      <div id="status"></div>
+    </div>
+    <div id="curseFx"></div>
+
+    <div id="overlay">
+      <div id="startPanel">
+        <h2>Choose Your Character</h2>
+        <p>Girls = quick and cute. Boys = ugly and strong.</p>
+        <div id="charGrid">
+          <button class="char-btn" data-char="boy1">Boy 1 (Ugly/Strong)</button>
+          <button class="char-btn" data-char="boy2">Boy 2 (Ugly/Strong)</button>
+          <button class="char-btn" data-char="girl1">Girl 1 (Cute/Quick)</button>
+          <button class="char-btn" data-char="girl2">Girl 2 (Cute/Quick)</button>
+        </div>
+        <button id="startBtn" disabled>Start Run</button>
+      </div>
+      <div id="messagePanel" class="hidden"></div>
+    </div>
+
+    <script type="module" src="game.js"></script>
+  </body>
+</html>
