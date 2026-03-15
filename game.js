@@ -1,25 +1,30 @@
 import * as THREE from "https://unpkg.com/three@0.164.1/build/three.module.js";
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color("#78b9ff");
-scene.fog = new THREE.Fog("#78b9ff", 80, 220);
-
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 600);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#7fb7ff");
+scene.fog = new THREE.Fog("#7fb7ff", 80, 240);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
 const statusEl = document.getElementById("status");
 const overlayEl = document.getElementById("overlay");
+const curseFxEl = document.getElementById("curseFx");
 
 const world = {
-  size: 36,
-  gravity: 30,
-  eventTimer: 18,
-  eventDuration: 0,
-  eventName: "Normal gravity",
-  windSlide: new THREE.Vector3(0, 0, 0),
+  level: 1,
+  gravity: 34,
+  jumpV: 15.5,
+  maxJumpGap: 6.6,
+  lavaY: -14,
+  tileSize: 4,
+  speedScale: 1,
+  curseTimer: 0,
+  catShootCd: 0,
+  rngSeed: Math.random() * 1e6,
 };
 
 const player = {
@@ -29,56 +34,49 @@ const player = {
   pitch: 0,
   grounded: false,
   health: 100,
-  jumpCooldown: 0,
+  maxHealth: 100,
+  respawns: 0,
 };
 
-const keys = {};
-let gameStarted = false;
+const input = {};
+let started = false;
 
-const terrain = [];
-const blocksGroup = new THREE.Group();
-scene.add(blocksGroup);
+const courseGroup = new THREE.Group();
+const hazardGroup = new THREE.Group();
+const actorGroup = new THREE.Group();
+scene.add(courseGroup, hazardGroup, actorGroup);
 
-const waterfallBounds = {
-  min: new THREE.Vector3(10, -8, 10),
-  max: new THREE.Vector3(16, 20, 16),
-};
-
+const colliders = []; // AABB boxes
+const courseNodes = []; // platform centers
+const movingPlatforms = [];
+const curseZones = [];
+const arrowTraps = [];
+const enemyProjectiles = [];
 const enemies = [];
-const enemyCount = 14;
+let dog = null;
+let playerMesh = null;
 
-const playerMesh = buildPlayerMesh();
-scene.add(playerMesh);
+initLights();
+initLava();
+playerMesh = createDalekCan();
+actorGroup.add(playerMesh);
+buildLevel(1);
 
-buildWorld();
-buildLights();
-buildWaterfall();
-spawnEnemies();
-
-camera.position.set(0, 10, 16);
-
-overlayEl.addEventListener("click", () => {
-  renderer.domElement.requestPointerLock();
-});
+overlayEl.addEventListener("click", () => renderer.domElement.requestPointerLock());
 
 document.addEventListener("pointerlockchange", () => {
-  gameStarted = document.pointerLockElement === renderer.domElement;
-  overlayEl.classList.toggle("hidden", gameStarted);
+  started = document.pointerLockElement === renderer.domElement;
+  overlayEl.classList.toggle("hidden", started);
 });
 
-document.addEventListener("keydown", (e) => {
-  keys[e.code] = true;
-});
-
-document.addEventListener("keyup", (e) => {
-  keys[e.code] = false;
-});
+document.addEventListener("keydown", (e) => (input[e.code] = true));
+document.addEventListener("keyup", (e) => (input[e.code] = false));
 
 document.addEventListener("mousemove", (e) => {
-  if (!gameStarted) return;
+  if (!started) return;
   player.yaw -= e.movementX * 0.0022;
   player.pitch -= e.movementY * 0.0018;
-  player.pitch = Math.max(-1.45, Math.min(1.45, player.pitch));
+  player.pitch = THREE.MathUtils.clamp(player.pitch, -1.35, 1.2);
 });
 
 window.addEventListener("resize", () => {
@@ -88,414 +86,558 @@ window.addEventListener("resize", () => {
 });
 
 const clock = new THREE.Clock();
-animate();
+loop();
 
-function animate() {
+function loop() {
   const dt = Math.min(clock.getDelta(), 0.033);
-  if (gameStarted && player.health > 0) {
-    stepEvents(dt);
-    stepPlayer(dt);
-    stepEnemies(dt);
+  if (started) {
+    tickPlayer(dt);
+    tickMovingPlatforms(dt);
+    tickEnemies(dt);
+    tickProjectiles(dt);
+    tickArrowTraps(dt);
+    tickCurse(dt);
+    checkLevelProgress();
     updateCamera();
     updateUI();
   }
 
-  playerMesh.position.copy(player.pos);
-  playerMesh.rotation.y = player.yaw + Math.PI;
-  animatePlayerBody(clock.elapsedTime);
-
+  animateDalek(clock.elapsedTime);
   renderer.render(scene, camera);
-  requestAnimationFrame(animate);
+  requestAnimationFrame(loop);
 }
 
-function stepEvents(dt) {
-  world.eventTimer -= dt;
-  if (world.eventDuration > 0) {
-    world.eventDuration -= dt;
-    if (world.eventDuration <= 0) resetEvent();
-  } else if (world.eventTimer <= 0) {
-    triggerRandomEvent();
+function buildLevel(level) {
+  world.level = level;
+  world.speedScale = 1 + (level - 1) * 0.16;
+  world.catShootCd = Math.max(1.5, 2.8 - level * 0.16);
+  world.rngSeed = Math.random() * 1e6;
+  clearGroups();
+
+  const rng = mulberry32(Math.floor(world.rngSeed));
+  const width = world.tileSize;
+  const platformCount = 16 + Math.min(20, level * 2);
+  const maxGap = Math.min(world.maxJumpGap, 4.2 + level * 0.12);
+  let pos = new THREE.Vector3(0, 2, 0);
+  let heading = new THREE.Vector3(0, 0, 1);
+
+  for (let i = 0; i < platformCount; i++) {
+    const box = new THREE.Vector3(width + rng() * 2.2, 1.4 + rng() * 0.9, width + rng() * 2.2);
+    addPlatform(pos.clone(), box, "#6faa52");
+    courseNodes.push(pos.clone());
+
+    if (i > 2 && rng() > 0.73) addCurseZone(pos.clone(), box);
+    if (i > 3 && rng() > 0.79) addMovingPusher(pos.clone(), box, rng);
+
+    const yaw = (rng() - 0.5) * 0.8;
+    heading.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw).normalize();
+    const gap = 2 + rng() * maxGap;
+    const dy = (rng() - 0.5) * Math.min(2.2, 0.5 + level * 0.1);
+
+    const next = pos.clone().addScaledVector(heading, box.z * 0.45 + gap + width * 0.45);
+    next.y = THREE.MathUtils.clamp(pos.y + dy, 1, 8);
+
+    // Enforce jumpability
+    if (!isJumpable(pos, next, gap)) {
+      next.copy(pos).addScaledVector(heading, box.z * 0.45 + (1.8 + maxGap * 0.55) + width * 0.45);
+      next.y = THREE.MathUtils.clamp(pos.y + Math.sign(dy) * 0.8, 1, 6);
+    }
+    pos = next;
+  }
+
+  // Finish platform and dog
+  addPlatform(pos.clone(), new THREE.Vector3(7, 1.5, 7), "#9ac16f");
+  dog = createDog();
+  dog.position.copy(pos).add(new THREE.Vector3(0, 1.5, 0));
+  actorGroup.add(dog);
+
+  // Enemies by level
+  spawnCats(Math.min(3 + level, 10), rng);
+  if (level >= 3) spawnArrowTraps(Math.min(2 + level, 9), rng);
+  if (level >= 5) spawnWolves(Math.min(1 + Math.floor(level / 2), 6), rng);
+
+  // Reset player at start
+  player.pos.copy(courseNodes[0]).add(new THREE.Vector3(0, 3.1, 0));
+  player.vel.set(0, 0, 0);
+  player.health = player.maxHealth;
+}
+
+function isJumpable(a, b, gap) {
+  const dxz = new THREE.Vector2(b.x - a.x, b.z - a.z).length();
+  const dy = b.y - a.y;
+  const t = dxz / 10.5; // approx sprint horizontal speed
+  const yReach = world.jumpV * t - 0.5 * world.gravity * t * t;
+  return gap <= world.maxJumpGap && dy <= 2.6 && yReach > dy - 0.6;
+}
+
+function addPlatform(center, size, color) {
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.95 });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size.x, size.y, size.z), mat);
+  mesh.position.copy(center);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  courseGroup.add(mesh);
+
+  colliders.push({
+    min: new THREE.Vector3(center.x - size.x / 2, center.y - size.y / 2, center.z - size.z / 2),
+    max: new THREE.Vector3(center.x + size.x / 2, center.y + size.y / 2, center.z + size.z / 2),
+    movingRef: null,
+  });
+}
+
+function addCurseZone(center, size) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(size.x * 0.7, 0.4, size.z * 0.7),
+    new THREE.MeshStandardMaterial({ color: "#4f1d69", emissive: "#250a3c", emissiveIntensity: 0.6 }),
+  );
+  mesh.position.copy(center).add(new THREE.Vector3(0, size.y * 0.52 + 0.22, 0));
+  hazardGroup.add(mesh);
+  curseZones.push({ mesh, radius: Math.max(size.x, size.z) * 0.36 });
+}
+
+function addMovingPusher(center, size, rng) {
+  const pusher = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1.4, Math.max(2.2, size.z * 0.5)),
+    new THREE.MeshStandardMaterial({ color: "#d6b35a", roughness: 0.7 }),
+  );
+  pusher.position.copy(center).add(new THREE.Vector3(0, size.y * 0.6 + 0.7, 0));
+  pusher.castShadow = true;
+  hazardGroup.add(pusher);
+  movingPlatforms.push({
+    mesh: pusher,
+    base: pusher.position.clone(),
+    amp: 1 + rng() * 1.4,
+    speed: (1.2 + rng() * 1.4) * world.speedScale,
+    axis: rng() > 0.5 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
+  });
+}
+
+function spawnCats(count, rng) {
+  for (let i = 2; i < courseNodes.length - 2 && enemies.length < count; i += Math.max(2, Math.floor(rng() * 4) + 1)) {
+    const cat = createCatEnemy();
+    cat.group.position.copy(courseNodes[i]).add(new THREE.Vector3(0, 1.25, 0));
+    actorGroup.add(cat.group);
+    enemies.push(cat);
   }
 }
 
-function triggerRandomEvent() {
-  const choices = [
-    {
-      name: "Zero gravity burst",
-      duration: 7,
-      apply: () => {
-        world.gravity = 2;
-      },
-    },
-    {
-      name: "Ground-slide anomaly",
-      duration: 8,
-      apply: () => {
-        const angle = Math.random() * Math.PI * 2;
-        world.windSlide.set(Math.cos(angle) * 14, 0, Math.sin(angle) * 14);
-      },
-    },
-    {
-      name: "Heavy gravity collapse",
-      duration: 7,
-      apply: () => {
-        world.gravity = 55;
-      },
-    },
-  ];
-  const event = choices[Math.floor(Math.random() * choices.length)];
-  world.eventName = event.name;
-  world.eventDuration = event.duration;
-  world.eventTimer = 22;
-  event.apply();
+function spawnWolves(count, rng) {
+  for (let i = 3; i < courseNodes.length - 2 && count > 0; i += 4) {
+    if (rng() < 0.55) continue;
+    const wolf = createWolfEnemy();
+    wolf.group.position.copy(courseNodes[i]).add(new THREE.Vector3(0, 1.1, 0));
+    actorGroup.add(wolf.group);
+    enemies.push(wolf);
+    count -= 1;
+  }
 }
 
-function resetEvent() {
-  world.gravity = 30;
-  world.windSlide.set(0, 0, 0);
-  world.eventName = "Normal gravity";
+function spawnArrowTraps(count, rng) {
+  for (let i = 2; i < courseNodes.length - 2 && arrowTraps.length < count; i += 3) {
+    if (rng() < 0.35) continue;
+    const origin = courseNodes[i].clone().add(new THREE.Vector3((rng() - 0.5) * 2, 2.1, (rng() - 0.5) * 2));
+    const dir = courseNodes[Math.min(i + 1, courseNodes.length - 1)].clone().sub(courseNodes[i]).setY(0).normalize();
+
+    const trap = new THREE.Mesh(
+      new THREE.BoxGeometry(0.8, 0.8, 0.8),
+      new THREE.MeshStandardMaterial({ color: "#8a5d2e" }),
+    );
+    trap.position.copy(origin);
+    trap.castShadow = true;
+    hazardGroup.add(trap);
+    arrowTraps.push({ mesh: trap, dir, cooldown: Math.max(0.9, 1.7 - world.level * 0.08), timer: rng() * 1.3 });
+  }
 }
 
-function stepPlayer(dt) {
-  const run = keys.ShiftLeft || keys.ShiftRight;
-  const speed = run ? 22 : 13;
+function tickPlayer(dt) {
+  const sprint = input.ShiftLeft || input.ShiftRight;
+  const speed = (sprint ? 14 : 10) * (1 + Math.min(0.3, world.level * 0.02));
   const forward = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw));
   const right = new THREE.Vector3(forward.z, 0, -forward.x);
-
   const move = new THREE.Vector3();
-  if (keys.KeyW) move.add(forward);
-  if (keys.KeyS) move.sub(forward);
-  if (keys.KeyA) move.sub(right);
-  if (keys.KeyD) move.add(right);
+
+  if (input.KeyW) move.add(forward);
+  if (input.KeyS) move.sub(forward);
+  if (input.KeyA) move.sub(right);
+  if (input.KeyD) move.add(right);
+
   if (move.lengthSq() > 0) {
     move.normalize().multiplyScalar(speed);
-    player.vel.x = THREE.MathUtils.lerp(player.vel.x, move.x, 0.2);
-    player.vel.z = THREE.MathUtils.lerp(player.vel.z, move.z, 0.2);
+    player.vel.x = THREE.MathUtils.lerp(player.vel.x, move.x, 0.18);
+    player.vel.z = THREE.MathUtils.lerp(player.vel.z, move.z, 0.18);
   } else {
-    player.vel.x *= 0.82;
-    player.vel.z *= 0.82;
+    player.vel.x *= 0.84;
+    player.vel.z *= 0.84;
   }
 
-  player.vel.x += world.windSlide.x * dt;
-  player.vel.z += world.windSlide.z * dt;
-
-  player.jumpCooldown -= dt;
-  if (keys.Space && player.grounded && player.jumpCooldown <= 0) {
-    player.vel.y = Math.max(12, 15 - world.gravity * 0.1);
+  if (input.Space && player.grounded) {
+    player.vel.y = world.jumpV;
     player.grounded = false;
-    player.jumpCooldown = 0.2;
   }
 
   player.vel.y -= world.gravity * dt;
+  const prev = player.pos.clone();
   player.pos.addScaledVector(player.vel, dt);
 
-  const groundHeight = sampleGround(player.pos.x, player.pos.z) + 2.4;
-  if (player.pos.y <= groundHeight) {
-    player.pos.y = groundHeight;
-    player.vel.y = 0;
-    player.grounded = true;
+  resolveGroundCollision(prev);
+
+  if (player.pos.y < world.lavaY + 0.5) {
+    failRun("You fell into lava. Run reset.");
   }
 
-  const limit = world.size / 2 - 1;
-  player.pos.x = THREE.MathUtils.clamp(player.pos.x, -limit, limit);
-  player.pos.z = THREE.MathUtils.clamp(player.pos.z, -limit, limit);
+  if (player.health <= 0) {
+    failRun("You were defeated. Run reset.");
+  }
+
+  playerMesh.position.copy(player.pos);
+  playerMesh.rotation.y = player.yaw + Math.PI;
 }
 
-function stepEnemies(dt) {
-  const waterfallCenter = new THREE.Vector3(13, 0, 13);
+function resolveGroundCollision(prev) {
+  player.grounded = false;
+  const px = player.pos.x;
+  const pz = player.pos.z;
 
-  enemies.forEach((enemy) => {
-    if (enemy.melted) return;
+  for (const c of colliders) {
+    const insideXZ = px > c.min.x && px < c.max.x && pz > c.min.z && pz < c.max.z;
+    if (!insideXZ) continue;
 
-    const toPlayer = player.pos.clone().sub(enemy.group.position);
-    toPlayer.y = 0;
-    const distance = toPlayer.length();
-    if (distance > 0.2) {
-      toPlayer.normalize();
-      enemy.vel.lerp(toPlayer.multiplyScalar(5.5), 0.08);
-      enemy.group.position.addScaledVector(enemy.vel, dt);
-      enemy.group.rotation.y = Math.atan2(enemy.vel.x, enemy.vel.z);
+    const top = c.max.y + 1.8;
+    const prevAbove = prev.y >= top - 0.2;
+    if (player.pos.y <= top && prevAbove && player.vel.y <= 0) {
+      player.pos.y = top;
+      player.vel.y = 0;
+      player.grounded = true;
+      break;
     }
+  }
+}
 
-    const gy = sampleGround(enemy.group.position.x, enemy.group.position.z) + 1.35;
-    enemy.group.position.y = gy + Math.sin(clock.elapsedTime * 6 + enemy.seed) * 0.12;
+function tickMovingPlatforms(dt) {
+  const t = clock.elapsedTime;
+  movingPlatforms.forEach((m) => {
+    const offset = Math.sin(t * m.speed) * m.amp;
+    m.mesh.position.copy(m.base).addScaledVector(m.axis, offset);
 
-    if (distance < 2.2) {
-      player.health -= dt * 7;
-    }
-
-    if (inWaterfall(enemy.group.position)) {
-      enemy.meltTimer += dt;
-      enemy.group.scale.setScalar(Math.max(0.05, 1 - enemy.meltTimer * 0.65));
-      enemy.group.position.lerp(waterfallCenter, 0.02);
-      if (enemy.meltTimer > 1.6) {
-        enemy.melted = true;
-        enemy.group.visible = false;
-      }
-    } else {
-      enemy.meltTimer = Math.max(0, enemy.meltTimer - dt * 0.5);
-      enemy.group.scale.setScalar(1 - enemy.meltTimer * 0.35);
+    const dist = player.pos.distanceTo(m.mesh.position);
+    if (dist < 3.2 && player.grounded && Math.abs(player.pos.y - (m.mesh.position.y + 1.2)) < 1.2) {
+      player.pos.addScaledVector(m.axis, Math.cos(t * m.speed) * m.amp * m.speed * dt * 0.45);
     }
   });
 }
 
-function inWaterfall(pos) {
-  return (
-    pos.x > waterfallBounds.min.x &&
-    pos.x < waterfallBounds.max.x &&
-    pos.y > waterfallBounds.min.y &&
-    pos.y < waterfallBounds.max.y &&
-    pos.z > waterfallBounds.min.z &&
-    pos.z < waterfallBounds.max.z
+function tickCurse(dt) {
+  let onCurse = false;
+  for (const zone of curseZones) {
+    const d = zone.mesh.position.clone().setY(player.pos.y).distanceTo(player.pos);
+    if (d < zone.radius) {
+      onCurse = true;
+      break;
+    }
+  }
+
+  if (onCurse) world.curseTimer = Math.min(5, world.curseTimer + dt * 1.8);
+  else world.curseTimer = Math.max(0, world.curseTimer - dt * 0.9);
+
+  const k = world.curseTimer / 5;
+  scene.fog.near = 8 + (1 - k) * 72;
+  scene.fog.far = 24 + (1 - k) * 216;
+  curseFxEl.style.opacity = (k * 0.9).toFixed(2);
+}
+
+function tickEnemies(dt) {
+  const player2D = player.pos.clone().setY(0);
+  enemies.forEach((e) => {
+    if (!e.alive) return;
+
+    const self2D = e.group.position.clone().setY(0);
+    const toP = player2D.clone().sub(self2D);
+    const d = toP.length();
+
+    if (d > 0.1) {
+      const dir = toP.normalize();
+      e.vel.lerp(dir.multiplyScalar(e.speed * world.speedScale), 0.08);
+      e.group.position.addScaledVector(e.vel, dt);
+      e.group.rotation.y = Math.atan2(e.vel.x, e.vel.z);
+    }
+
+    e.group.position.y += Math.sin(clock.elapsedTime * 6 + e.seed) * 0.01;
+
+    if (d < e.hitRange) player.health -= dt * e.meleeDamage;
+
+    e.shootTimer -= dt;
+    if (e.type === "cat" && e.shootTimer <= 0 && d < 34) {
+      fireLaser(e.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)), player.pos.clone().add(new THREE.Vector3(0, 1.5, 0)));
+      e.shootTimer = world.catShootCd + Math.random() * 0.8;
+    }
+  });
+}
+
+function fireLaser(start, target) {
+  const dir = target.sub(start).normalize();
+  const laser = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.07, 0.07, 1.2, 8),
+    new THREE.MeshBasicMaterial({ color: "#ff3940" }),
   );
+  laser.position.copy(start);
+  laser.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone());
+  hazardGroup.add(laser);
+  enemyProjectiles.push({ mesh: laser, vel: dir.multiplyScalar(26), ttl: 2.3, damage: 12 });
+}
+
+function tickProjectiles(dt) {
+  for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+    const p = enemyProjectiles[i];
+    p.ttl -= dt;
+    p.mesh.position.addScaledVector(p.vel, dt);
+
+    if (p.mesh.position.distanceTo(player.pos.clone().add(new THREE.Vector3(0, 1.2, 0))) < 1.2) {
+      player.health -= p.damage;
+      destroyProjectile(i);
+      continue;
+    }
+
+    if (p.ttl <= 0 || p.mesh.position.y < world.lavaY) destroyProjectile(i);
+  }
+}
+
+function destroyProjectile(i) {
+  const p = enemyProjectiles[i];
+  hazardGroup.remove(p.mesh);
+  p.mesh.geometry.dispose();
+  p.mesh.material.dispose();
+  enemyProjectiles.splice(i, 1);
+}
+
+function tickArrowTraps(dt) {
+  arrowTraps.forEach((t) => {
+    t.timer -= dt;
+    if (t.timer > 0) return;
+    t.timer = t.cooldown;
+
+    const arrow = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.08, 1.1, 6),
+      new THREE.MeshStandardMaterial({ color: "#9a7a52" }),
+    );
+    arrow.position.copy(t.mesh.position);
+    arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), t.dir.clone());
+    hazardGroup.add(arrow);
+    enemyProjectiles.push({ mesh: arrow, vel: t.dir.clone().multiplyScalar(19 + world.level), ttl: 3.2, damage: 18 });
+  });
+}
+
+function checkLevelProgress() {
+  if (!dog) return;
+  if (player.pos.distanceTo(dog.position) < 2.5) {
+    overlayEl.textContent = `Dog saved! Advancing to level ${world.level + 1}...`;
+    overlayEl.classList.remove("hidden");
+    started = false;
+    setTimeout(() => {
+      buildLevel(world.level + 1);
+      overlayEl.textContent = "Click to Start";
+    }, 950);
+  }
+}
+
+function failRun(msg) {
+  player.respawns += 1;
+  started = false;
+  overlayEl.textContent = msg + " Click to try again.";
+  overlayEl.classList.remove("hidden");
+  document.exitPointerLock();
+  buildLevel(world.level);
 }
 
 function updateCamera() {
-  const head = new THREE.Vector3(0, 3.2, 0);
-  const back = new THREE.Vector3(0, 2.8, 8.8);
-  back.applyAxisAngle(new THREE.Vector3(1, 0, 0), player.pitch * 0.4);
-  back.applyAxisAngle(new THREE.Vector3(0, 1, 0), player.yaw);
+  const camOffset = new THREE.Vector3(0, 3.1, 8.8);
+  camOffset.applyAxisAngle(new THREE.Vector3(1, 0, 0), player.pitch * 0.45);
+  camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), player.yaw);
+  camera.position.copy(player.pos).add(camOffset);
 
-  camera.position.copy(player.pos).add(back);
-  const lookTarget = player.pos.clone().add(head);
-  lookTarget.x += Math.sin(player.yaw) * 7;
-  lookTarget.y += Math.sin(player.pitch) * 5;
-  lookTarget.z += Math.cos(player.yaw) * 7;
-  camera.lookAt(lookTarget);
+  const look = player.pos.clone().add(new THREE.Vector3(0, 2.1, 0));
+  look.x += Math.sin(player.yaw) * 7;
+  look.y += Math.sin(player.pitch) * 4.4;
+  look.z += Math.cos(player.yaw) * 7;
+  camera.lookAt(look);
 }
 
 function updateUI() {
-  const remaining = enemies.filter((e) => !e.melted).length;
-  statusEl.innerHTML = `Health: ${Math.max(0, player.health).toFixed(0)}<br>Flower fiends left: ${remaining}<br>Gravity event: ${world.eventName}`;
-
-  if (player.health <= 0) {
-    overlayEl.textContent = "You wilted. Reload to retry.";
-    overlayEl.classList.remove("hidden");
-    document.exitPointerLock();
-  } else if (remaining === 0) {
-    overlayEl.textContent = "Victory! Every flower fiend melted.";
-    overlayEl.classList.remove("hidden");
-    document.exitPointerLock();
-  }
+  statusEl.innerHTML = `Level: ${world.level}<br>Health: ${Math.max(0, player.health).toFixed(0)}<br>Cats/Wolves: ${enemies.filter((e) => e.alive).length}<br>Arrow traps: ${arrowTraps.length}<br>Respawns: ${player.respawns}`;
 }
 
-function buildWorld() {
-  const grassMat = new THREE.MeshStandardMaterial({ color: "#4f8a3e", roughness: 0.95 });
-  const dirtMat = new THREE.MeshStandardMaterial({ color: "#7d5f3c", roughness: 1 });
-  const blockGeo = new THREE.BoxGeometry(2, 2, 2);
-
-  for (let x = -world.size / 2; x < world.size / 2; x++) {
-    for (let z = -world.size / 2; z < world.size / 2; z++) {
-      const h = Math.floor(Math.sin(x * 0.25) * 1.5 + Math.cos(z * 0.2) * 1.5 + Math.sin((x + z) * 0.18));
-      terrain.push({ x, z, h });
-
-      const top = new THREE.Mesh(blockGeo, grassMat);
-      top.castShadow = true;
-      top.receiveShadow = true;
-      top.position.set(x * 2, h * 2, z * 2);
-      blocksGroup.add(top);
-
-      for (let y = h - 1; y >= -3; y--) {
-        const dirt = new THREE.Mesh(blockGeo, dirtMat);
-        dirt.castShadow = true;
-        dirt.receiveShadow = true;
-        dirt.position.set(x * 2, y * 2, z * 2);
-        blocksGroup.add(dirt);
-      }
+function clearGroups() {
+  [courseGroup, hazardGroup, actorGroup].forEach((group) => {
+    while (group.children.length) {
+      const c = group.children.pop();
+      c.traverse?.((n) => {
+        if (n.geometry) n.geometry.dispose();
+        if (n.material) {
+          if (Array.isArray(n.material)) n.material.forEach((m) => m.dispose());
+          else n.material.dispose();
+        }
+      });
     }
-  }
-}
-
-function buildWaterfall() {
-  const rockMat = new THREE.MeshStandardMaterial({ color: "#6d7078", roughness: 0.95 });
-  const waterMat = new THREE.MeshStandardMaterial({
-    color: "#67b9ff",
-    roughness: 0.1,
-    transparent: true,
-    opacity: 0.72,
-    emissive: "#2255aa",
-    emissiveIntensity: 0.25,
   });
 
-  for (let y = 8; y >= -2; y--) {
-    const water = new THREE.Mesh(new THREE.BoxGeometry(6, 2, 2), waterMat);
-    water.position.set(13, y * 2, 13);
-    water.receiveShadow = true;
-    scene.add(water);
-  }
+  colliders.length = 0;
+  courseNodes.length = 0;
+  movingPlatforms.length = 0;
+  curseZones.length = 0;
+  arrowTraps.length = 0;
+  enemyProjectiles.length = 0;
+  enemies.length = 0;
 
-  const pool = new THREE.Mesh(new THREE.BoxGeometry(8, 1, 8), waterMat);
-  pool.position.set(13, -4.6, 13);
-  pool.receiveShadow = true;
-  scene.add(pool);
-
-  const cliff = new THREE.Mesh(new THREE.BoxGeometry(10, 14, 5), rockMat);
-  cliff.position.set(13, 10, 16);
-  cliff.castShadow = true;
-  cliff.receiveShadow = true;
-  scene.add(cliff);
+  actorGroup.add(playerMesh);
 }
 
-function buildLights() {
-  const hemi = new THREE.HemisphereLight("#a8d1ff", "#334455", 0.45);
-  scene.add(hemi);
-
-  const sunColors = ["#ffe58a", "#ffd68a", "#fff3a8", "#f9de9f", "#fff0c4"];
-  const sunPositions = [
-    [60, 80, 10],
-    [-70, 78, -30],
-    [25, 70, -85],
-    [-25, 65, 75],
-    [0, 95, 0],
-  ];
-
-  sunPositions.forEach((p, idx) => {
-    const dir = new THREE.DirectionalLight(sunColors[idx], 0.45);
-    dir.position.set(...p);
-    dir.castShadow = idx === 0;
-    if (idx === 0) {
-      dir.shadow.mapSize.set(2048, 2048);
-      dir.shadow.camera.left = -90;
-      dir.shadow.camera.right = 90;
-      dir.shadow.camera.top = 90;
-      dir.shadow.camera.bottom = -90;
+function initLights() {
+  scene.add(new THREE.HemisphereLight("#c2e0ff", "#3e2b1f", 0.42));
+  const sunColors = ["#ffd685", "#ffe7a1", "#ffc29d", "#f9e6b8", "#fff7cc"];
+  const sunPos = [[45, 78, 20], [-50, 72, -35], [0, 88, 0], [25, 67, -62], [-40, 65, 55]];
+  sunPos.forEach((p, i) => {
+    const d = new THREE.DirectionalLight(sunColors[i], 0.35);
+    d.position.set(...p);
+    d.castShadow = i === 0;
+    if (i === 0) {
+      d.shadow.mapSize.set(2048, 2048);
+      d.shadow.camera.left = -120;
+      d.shadow.camera.right = 120;
+      d.shadow.camera.top = 120;
+      d.shadow.camera.bottom = -120;
     }
-    scene.add(dir);
+    scene.add(d);
 
-    const sunMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(3.2, 16, 16),
-      new THREE.MeshBasicMaterial({ color: sunColors[idx] }),
-    );
-    sunMesh.position.copy(dir.position.clone().multiplyScalar(0.65));
-    scene.add(sunMesh);
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(2.8, 16, 16), new THREE.MeshBasicMaterial({ color: sunColors[i] }));
+    sphere.position.copy(d.position.clone().multiplyScalar(0.62));
+    scene.add(sphere);
   });
 }
 
-function buildPlayerMesh() {
+function initLava() {
+  const lava = new THREE.Mesh(
+    new THREE.BoxGeometry(420, 2, 420),
+    new THREE.MeshStandardMaterial({ color: "#ff5f0f", emissive: "#a72f00", emissiveIntensity: 0.6, roughness: 0.8 }),
+  );
+  lava.position.set(0, world.lavaY, 0);
+  lava.receiveShadow = true;
+  scene.add(lava);
+}
+
+function createDalekCan() {
   const g = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: "#8badbb", metalness: 0.35, roughness: 0.45 });
+  const legMat = new THREE.MeshStandardMaterial({ color: "#7a4a21", roughness: 0.8 });
+  const armMat = new THREE.MeshStandardMaterial({ color: "#b8d5df", metalness: 0.2, roughness: 0.45 });
 
-  const metal = new THREE.MeshStandardMaterial({ color: "#7fa8b7", roughness: 0.35, metalness: 0.45 });
-  const legMat = new THREE.MeshStandardMaterial({ color: "#7b4b22", roughness: 0.8 });
-  const armMat = new THREE.MeshStandardMaterial({ color: "#a8d4df", roughness: 0.4, metalness: 0.3 });
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(1.1, 16, 16), bodyMat);
+  dome.position.y = 3.1;
+  g.add(dome);
 
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.45, 2.4, 18), metal);
-  body.position.y = 2.1;
-  body.castShadow = true;
-  g.add(body);
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.9, 2.4, 20), bodyMat);
+  torso.position.y = 1.8;
+  g.add(torso);
 
-  const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.25, 1.9, 12), metal);
-  spout.rotation.z = Math.PI / 2.8;
-  spout.position.set(1.1, 2.45, 0);
-  spout.castShadow = true;
+  const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.23, 1.7, 10), bodyMat);
+  spout.rotation.z = -Math.PI / 2.8;
+  spout.position.set(1.6, 2.4, 0);
   g.add(spout);
 
-  const handle = new THREE.Mesh(new THREE.TorusGeometry(0.68, 0.1, 8, 20, Math.PI), metal);
-  handle.rotation.y = Math.PI / 2;
-  handle.position.set(-0.7, 2.5, 0);
-  handle.castShadow = true;
-  g.add(handle);
-
-  const limbGeo = new THREE.CylinderGeometry(0.12, 0.12, 1.25, 8);
-  const legOffsets = [-0.55, 0, 0.55];
-  legOffsets.forEach((x) => {
-    const leg = new THREE.Mesh(limbGeo, legMat);
-    leg.position.set(x, 0.7, 0.25);
-    leg.castShadow = true;
+  [-0.7, 0, 0.7].forEach((x) => {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 1.2, 8), legMat);
+    leg.position.set(x, 0.6, 0.45);
     g.add(leg);
   });
 
-  const armOffsets = [
-    [1.05, 2.35, 0.7],
-    [1.1, 2.15, -0.2],
-    [1.0, 2.5, -0.8],
-  ];
-  armOffsets.forEach(([x, y, z]) => {
-    const arm = new THREE.Mesh(limbGeo, armMat);
-    arm.rotation.z = -Math.PI / 3.8;
+  [[1.6, 2.5, 0.7], [1.7, 2.15, 0], [1.6, 2.5, -0.7]].forEach(([x, y, z]) => {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.1, 8), armMat);
     arm.position.set(x, y, z);
-    arm.castShadow = true;
+    arm.rotation.z = -Math.PI / 3;
     g.add(arm);
   });
 
-  g.position.copy(player.pos);
+  g.traverse((n) => {
+    if (n.isMesh) {
+      n.castShadow = true;
+      n.receiveShadow = true;
+    }
+  });
   return g;
 }
 
-function spawnEnemies() {
-  for (let i = 0; i < enemyCount; i++) {
-    const enemy = createFlowerEnemy();
-    const angle = (i / enemyCount) * Math.PI * 2;
-    const r = 20 + Math.random() * 8;
-    enemy.group.position.set(Math.cos(angle) * r, 1, Math.sin(angle) * r);
-    scene.add(enemy.group);
-    enemies.push(enemy);
-  }
+function animateDalek(t) {
+  const swing = Math.sin(t * 11) * Math.min(0.5, player.vel.length() * 0.04);
+  playerMesh.children.forEach((c, i) => {
+    if (i >= 4) c.rotation.x = swing * (i % 2 ? 1 : -1);
+  });
 }
 
-function createFlowerEnemy() {
-  const group = new THREE.Group();
-  const stem = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.1, 0.12, 1.2, 8),
-    new THREE.MeshStandardMaterial({ color: "#85c76d", roughness: 0.7 }),
-  );
-  stem.position.y = 0.7;
-  group.add(stem);
+function createCatEnemy() {
+  const g = new THREE.Group();
+  const fur = new THREE.MeshStandardMaterial({ color: "#707070", roughness: 0.8 });
+  const eye = new THREE.MeshBasicMaterial({ color: "#ff3434" });
 
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.5, 14, 14),
-    new THREE.MeshStandardMaterial({ color: "#c14dd3", roughness: 0.4 }),
-  );
-  head.position.y = 1.45;
-  head.castShadow = true;
-  group.add(head);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.3, 0.9), fur);
+  body.position.y = 1.1;
+  g.add(body);
 
-  for (let i = 0; i < 7; i++) {
-    const petal = new THREE.Mesh(
-      new THREE.BoxGeometry(0.16, 0.42, 0.72),
-      new THREE.MeshStandardMaterial({ color: "#ff83c2", roughness: 0.45 }),
-    );
-    const ang = (i / 7) * Math.PI * 2;
-    petal.position.set(Math.cos(ang) * 0.45, 1.45, Math.sin(ang) * 0.45);
-    petal.lookAt(0, 1.45, 0);
-    petal.rotation.x = Math.PI / 5;
-    group.add(petal);
-  }
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), fur);
+  head.position.set(0, 2, 0.05);
+  g.add(head);
 
-  const eyeMat = new THREE.MeshBasicMaterial({ color: "#0a0a0a" });
-  const eyeGeo = new THREE.SphereGeometry(0.06, 8, 8);
-  const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
-  const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
-  leftEye.position.set(-0.12, 1.5, 0.42);
-  rightEye.position.set(0.12, 1.5, 0.42);
-  group.add(leftEye, rightEye);
+  const earL = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.35, 4), fur);
+  const earR = earL.clone();
+  earL.position.set(-0.22, 2.5, 0.05);
+  earR.position.set(0.22, 2.5, 0.05);
+  g.add(earL, earR);
 
-  group.traverse((mesh) => {
-    if (mesh.isMesh) {
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-    }
-  });
+  const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), eye);
+  const eyeR = eyeL.clone();
+  eyeL.position.set(-0.16, 2.06, 0.42);
+  eyeR.position.set(0.16, 2.06, 0.42);
+  g.add(eyeL, eyeR);
 
-  return {
-    group,
-    vel: new THREE.Vector3(),
-    melted: false,
-    meltTimer: 0,
-    seed: Math.random() * Math.PI * 2,
+  g.traverse((m) => m.isMesh && ((m.castShadow = true), (m.receiveShadow = true)));
+
+  return { type: "cat", group: g, alive: true, vel: new THREE.Vector3(), speed: 5.5, hitRange: 1.6, meleeDamage: 10, shootTimer: 1.5, seed: Math.random() * 10 };
+}
+
+function createWolfEnemy() {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: "#50555f", roughness: 0.75 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.9, 0.8), mat);
+  body.position.y = 0.8;
+  g.add(body);
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), mat);
+  head.position.set(0.8, 1.05, 0);
+  g.add(head);
+
+  g.traverse((m) => m.isMesh && ((m.castShadow = true), (m.receiveShadow = true)));
+  return { type: "wolf", group: g, alive: true, vel: new THREE.Vector3(), speed: 7.2, hitRange: 1.8, meleeDamage: 18, shootTimer: 999, seed: Math.random() * 10 };
+}
+
+function createDog() {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: "#c18c54", roughness: 0.75 });
+  const glow = new THREE.MeshBasicMaterial({ color: "#fff4bc" });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.8, 0.7), mat);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.6, 0.6), mat);
+  head.position.set(0.9, 0.5, 0);
+  const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), glow);
+  beacon.position.set(0, 1, 0);
+
+  g.add(body, head, beacon);
+  g.traverse((m) => m.isMesh && ((m.castShadow = true), (m.receiveShadow = true)));
+  return g;
+}
+
+function mulberry32(a) {
+  return function () {
+    let t = (a += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-function animatePlayerBody(t) {
-  const swing = Math.sin(t * 9) * Math.min(1, player.vel.length() * 0.1);
-  playerMesh.children.forEach((child, idx) => {
-    if (idx >= 3) {
-      child.rotation.x = swing * 0.4 * (idx % 2 ? 1 : -1);
-    }
-  });
-}
-
-function sampleGround(worldX, worldZ) {
-  const x = Math.round(worldX / 2);
-  const z = Math.round(worldZ / 2);
-  return Math.sin(x * 0.25) * 3 + Math.cos(z * 0.2) * 3 + Math.sin((x + z) * 0.18) * 2;
 }
